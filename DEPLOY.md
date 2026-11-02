@@ -124,7 +124,6 @@ Key things to know:
 - **The VM's reverse proxy** handles TLS termination and firewall rules.
   The container listens on `127.0.0.1:8080` and does not need to manage TLS or
   open ports itself.
-- **SELinux and SSH** are configured by IT. `init.sh` does not touch them.
 - **Service accounts** exist because the NFS share uses `root_squash`. The
   container process must run as the uid that owns the secrets on the share.
   IT creates this account on the VM; `init.sh` checks that it matches
