@@ -5,8 +5,10 @@
 #   sudo ./init.sh
 #   podman compose up -d --build
 #
-# Only host-level concerns live here (packages, service account, SSH hardening,
-# SELinux). Everything else belongs in the container image.
+# Only host-level concerns live here (podman packages, checking the service
+# account, .env). Everything else belongs in the container image. The service
+# account, SSH, and SELinux are provisioned by IT; this script does not change
+# them.
 
 set -euo pipefail
 
@@ -33,7 +35,31 @@ warn() { echo "WARNING: $*" >&2; WARNINGS=$((WARNINGS + 1)); }
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
+# ── Service account ────────────────────────────────────────────────────────
+echo "== Service account =="
+# The container runs as this uid. On a production VM the secrets directory is
+# on a shared NFS mount exported with root_squash, meaning root cannot read
+# mode-0600 files -- only the service account can. IT provisions the account;
+# the uid/gid in service.conf must match it. See SECRETS.md for the production
+# story.
+account_fail() {
+    echo "FATAL: $*" >&2
+    echo "Fix SVC_USER/SVC_UID/SVC_GID in $CONF_FILE to match the service account" >&2
+    echo "on this VM, or request the account from PACS via help-astro@uw.edu." >&2
+    exit 1
+}
+have_user="$(getent passwd "$SVC_USER" || true)"
+[ -n "$have_user" ] || account_fail "user $SVC_USER does not exist"
+have_uid="$(echo "$have_user" | cut -d: -f3)"
+have_gid="$(echo "$have_user" | cut -d: -f4)"
+[ "$have_uid" = "$SVC_UID" ] \
+    || account_fail "user $SVC_USER has uid $have_uid, service.conf says $SVC_UID"
+[ "$have_gid" = "$SVC_GID" ] \
+    || account_fail "user $SVC_USER has primary gid $have_gid, service.conf says $SVC_GID"
+echo "  ok   user $SVC_USER ($SVC_UID:$SVC_GID) exists"
+
 # ── Packages ────────────────────────────────────────────────────────────────
+echo
 echo "== Packages =="
 need=()
 command -v podman >/dev/null || need+=(podman)
@@ -50,55 +76,6 @@ podman --version
 systemctl enable --now podman-restart.service >/dev/null 2>&1 \
     && echo "podman-restart.service enabled" \
     || warn "could not enable podman-restart.service (containers won't restart at boot)"
-
-# ── SSH hardening ───────────────────────────────────────────────────────────
-echo
-echo "== SSH hardening =="
-SSHD_CONF=/etc/ssh/sshd_config.d/00-svc-hardening.conf
-cat > "$SSHD_CONF" <<'EOF'
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-EOF
-chmod 0600 "$SSHD_CONF"
-if sshd -t >/dev/null 2>&1; then
-    systemctl reload sshd >/dev/null 2>&1 \
-        && echo "  ok   password authentication disabled" \
-        || warn "could not reload sshd"
-else
-    warn "sshd config validation failed; check $SSHD_CONF"
-fi
-
-# ── Service account ────────────────────────────────────────────────────────
-echo
-echo "== Service account =="
-# The container runs as this uid. On a production VM the secrets directory is
-# on a shared NFS mount exported with root_squash, meaning root cannot read
-# mode-0600 files -- only the service account can. The uid/gid must match what
-# the NFS export owner uses; see SECRETS.md for the production story.
-if getent group "$SVC_GID" >/dev/null; then
-    have_group="$(getent group "$SVC_GID" | cut -d: -f1)"
-    if [ "$have_group" = "$SVC_USER" ]; then
-        echo "  ok   group $SVC_USER ($SVC_GID) exists"
-    else
-        warn "gid $SVC_GID belongs to group '$have_group', expected '$SVC_USER'"
-    fi
-else
-    groupadd -g "$SVC_GID" "$SVC_USER"
-    echo "  added group $SVC_USER ($SVC_GID)"
-fi
-
-if getent passwd "$SVC_UID" >/dev/null; then
-    have_user="$(getent passwd "$SVC_UID" | cut -d: -f1)"
-    if [ "$have_user" = "$SVC_USER" ]; then
-        echo "  ok   user $SVC_USER ($SVC_UID) exists"
-    else
-        warn "uid $SVC_UID belongs to user '$have_user', expected '$SVC_USER'"
-    fi
-else
-    useradd -u "$SVC_UID" -g "$SVC_GID" -M -d /nonexistent -s /bin/bash \
-            -c "Service account" "$SVC_USER" 2>/dev/null
-    echo "  added user $SVC_USER ($SVC_UID)"
-fi
 
 # ── Compose environment ────────────────────────────────────────────────────
 echo
