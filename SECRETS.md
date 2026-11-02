@@ -31,9 +31,9 @@ sudo -u $SVC_USER install -m 0600 /path/to/secret \
     /service/shire/<service>/secrets/my-secret
 ```
 
-`init.sh` creates this account on the host, so this works on any VM that has
-been initialized. Before `init.sh` has run, use the numeric ids from
-`service.conf` instead:
+IT creates this account on the VM, and `init.sh` checks that it matches
+`service.conf`. If the account is not available by name, use the numeric ids
+from `service.conf` instead:
 
 ```bash
 setpriv --reuid=$SVC_UID --regid=$SVC_GID --clear-groups \

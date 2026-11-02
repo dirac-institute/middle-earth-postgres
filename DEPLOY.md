@@ -1,6 +1,6 @@
 # Deploying the Middle-earth service example to a DiRAC VM
 
-Target: stock Rocky 9 VM on UW DiRAC infrastructure.
+Target: stock Rocky 10 VM on UW DiRAC infrastructure.
 
 The VM provides a reverse proxy that handles TLS termination and routes
 traffic to your container on port 8080.
@@ -27,7 +27,7 @@ curl http://localhost:8080/
 | File | Role |
 |---|---|
 | `service.conf` | Single source of truth for the service account name, uid, and gid. Committed to the repo. Everything else reads from here. |
-| `init.sh` | Host-level only: podman + podman-compose, the service account, SSH hardening, SELinux, `.env`. Reads `service.conf`; idempotent; safe to re-run. |
+| `init.sh` | Host-level only: checks the service account matches `service.conf`, installs podman + podman-compose, enables `podman-restart.service`, writes `.env`. Idempotent; safe to re-run. |
 | `Dockerfile` | Apache httpd 2.4 + Python 3 + Flask/Gunicorn in one image. Apache serves static files and reverse-proxies `/api/` to Gunicorn. |
 | `start.sh` | Container entrypoint: starts Gunicorn in the background, then runs Apache in the foreground. |
 | `compose.yaml` | One service: `app` (Apache + Gunicorn in one container on port 8080). |
@@ -57,7 +57,8 @@ Gunicorn on an internal port. The `start.sh` entrypoint launches Gunicorn in
 the background and runs Apache in the foreground as PID 1.
 
 **Containers for everything.** The only things `init.sh` does on the host are
-install podman, create the service account, harden SSH, and configure SELinux.
+check the service account and install podman. The service account, SSH, and
+SELinux are provisioned by IT.
 All application logic, dependencies, and configuration live inside the
 container image. This means a deployment is fully reproducible from the repo
 checkout.
@@ -87,7 +88,8 @@ SVC_UID=1725455
 SVC_GID=2121725455
 ```
 
-It is committed to the repo. `init.sh` reads it and writes the values into
+It is committed to the repo. `init.sh` reads it, exits if the account does
+not exist on the VM with that uid and primary gid, and writes the values into
 `.env` alongside the per-host FQDN. The Dockerfile and compose.yaml consume
 these values via build args and environment variables with no hardcoded
 defaults — if `service.conf` is missing or incomplete, `init.sh` exits
@@ -112,7 +114,7 @@ SVC_FQDN=myhost.astro.washington.edu
 
 ## VM infrastructure context
 
-DiRAC VMs run Rocky 9 and use podman (not Docker) as the container runtime.
+DiRAC VMs run Rocky 10 and use podman (not Docker) as the container runtime.
 Key things to know:
 
 - **podman-compose** is the compose frontend. It reads the same `compose.yaml`
@@ -122,20 +124,16 @@ Key things to know:
 - **The VM's reverse proxy** handles TLS termination and firewall rules.
   The container listens on `127.0.0.1:8080` and does not need to manage TLS or
   open ports itself.
-- **SELinux** should be enforcing. `init.sh` sets it if it finds permissive
-  mode. If the service needs to write to host-mounted paths, add
-  `container_file_t` context via `semanage fcontext`.
-- **SSH** is hardened by `init.sh` (password auth disabled). Access is by key
-  only.
 - **Service accounts** exist because the NFS share uses `root_squash`. The
   container process must run as the uid that owns the secrets on the share.
-  `init.sh` creates this account on the host so the ids are available for
-  `podman compose`.
+  IT creates this account on the VM; `init.sh` checks that it matches
+  `service.conf` and exits if it does not.
 
 ## Rollout to another VM
 
 The procedure above is the whole deployment. On a new VM, confirm:
 
+- The service account in `service.conf` exists on the VM (IT provisions it).
 - The VM has network access to pull container base images.
 - For production: if the service has secrets, `/service/shire` is mounted and
   the secrets directory is populated (see `SECRETS.md`).

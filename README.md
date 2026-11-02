@@ -12,10 +12,12 @@ service into a standalone repo that deploys the same way.
 
 ### From DiRAC infrastructure
 
-- **A Rocky 9 VM** to deploy to, with `sudo` access or root login directly.
+- **A Rocky 10 VM** to deploy to, with `sudo` access or root login directly.
   The VM provides a reverse proxy that handles TLS termination and routes
   traffic to your container on port 8080.
-- **A service account uid/gid.** Your containers will run as this identity.
+- **A service account uid/gid**, created on the VM by IT. Your containers
+  will run as this identity, and `init.sh` exits if the account on the VM
+  does not match `service.conf`.
   On production VMs the service's secrets live on an NFS share exported with
   `root_squash`, so only this uid can read them. If you already have files on
   `/service/shire` for your service, use the uid/gid that owns them. If you
