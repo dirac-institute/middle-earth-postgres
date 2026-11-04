@@ -15,6 +15,9 @@
 #
 # The pg_*_all_data predefined roles apply to every table in every database,
 # including ones created later, so no per-database grants are needed.
+#
+# It also creates the pg_stat_statements extension in the postgres database
+# if it is missing (for the monitoring endpoint).
 set -uo pipefail
 
 SECRETS=/run/secrets/postgres
@@ -50,6 +53,10 @@ ALTER ROLE "replication" WITH LOGIN REPLICATION NOCREATEDB NOSUPERUSER NOCREATER
 
 GRANT pg_read_all_data, pg_write_all_data TO readwrite;
 GRANT pg_read_all_data TO readonly;
+
+-- Not a role, but the same kind of idempotent setup: the monitoring
+-- endpoint reads query statistics from this view (see postgresql.conf).
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 SQL
 }
 
