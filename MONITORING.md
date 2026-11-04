@@ -27,10 +27,15 @@ endpoint.
 | Source | Every | What |
 |---|---|---|
 | `database` | 60 s (`PGMON_INTERVAL`) | `monitor/metrics.sql` and `monitor/custom/*.sql`, run as `postgres` over the container-local socket; free space on `/data` |
-| `backups` | 300 s (`PGMON_BACKUP_INTERVAL`) | `pgbackrest info`, the backup scheduler's status files, the latest restore-test result, and `du` of the repository (all on `/service/shire`, read-only) |
+| `sizes` | 300 s (`PGMON_SLOW_INTERVAL`) | `monitor/sizes.sql`: database sizes. `pg_database_size()` looks at every file, so its cost grows with the number of tables and indexes |
+| `backups` | 300 s (`PGMON_SLOW_INTERVAL`) | `pgbackrest info`, the backup scheduler's status files and the latest restore-test result (all on `/service/shire`, read-only) |
+
+Nothing walks the data directory or the backup repository, so collection
+cost does not grow with the amount of data (apart from database sizes, kept
+to every 5 minutes).
 
 When a source fails (PostgreSQL down, shire unreachable), its success metric
-goes to 0 (`pg_up`, `pgmon_backup_probe_success`) and its other metrics are
+goes to 0 (`pg_up`, `pgmon_sizes_probe_success`, `pgmon_backup_probe_success`) and its other metrics are
 left out rather than repeated stale. `pgmon_collect_age_seconds{source}`
 grows if a collection is stuck. Because the endpoint serves the latest
 collection, every value can be up to one interval old: after PostgreSQL
@@ -63,7 +68,7 @@ are computed in Grafana.
 
 | Metric | Meaning |
 |---|---|
-| `pg_database_size_bytes` | Size on disk |
+| `pg_database_size_bytes` | Size on disk (every 5 minutes) |
 | `pg_database_connections` | Backends connected |
 | `pg_database_{xact_commit,xact_rollback}_total` | Transactions |
 | `pg_database_{blks_read,blks_hit}_total` | Blocks read from disk / found in shared buffers |
@@ -105,8 +110,7 @@ are computed in Grafana.
 | `pgbackrest_last_backup_duration_seconds{type}` | How long it took |
 | `pgbackrest_last_backup_database_bytes{type}` | Database size at that backup |
 | `pgbackrest_last_backup_repo_bytes{type}` | What that backup added to the repository (compressed) |
-| `pgbackrest_backups_repo_bytes` | All retained backups in the repository, without WAL |
-| `pgbackrest_repo_bytes` | Everything in the repository, WAL included |
+| `pgbackrest_backups_repo_bytes` | All retained backups in the repository (compressed). Archived WAL is not included: measuring it would mean walking the repository on NFS |
 | `pgbackrest_last_run_{success,timestamp_seconds}{job}` | The scheduler's most recent `backup` and `verify` runs |
 | `pgbackrest_restore_test_last_run_timestamp_seconds`, `pgbackrest_restore_test_last_success`, `pgbackrest_restore_test_last_pass_timestamp_seconds` | Automated restore tests (see BACKUP.md) |
 
@@ -116,6 +120,7 @@ are computed in Grafana.
 |---|---|
 | `pgmon_collect_age_seconds{source}`, `pgmon_collect_duration_seconds{source}` | Per source: time since its last collection finished, and how long it took |
 | `pgmon_custom_query_success{query}` | Per file in `monitor/custom/` |
+| `pgmon_sizes_probe_success` | 1 if the database sizes were read |
 
 ## Deployment-specific metrics
 

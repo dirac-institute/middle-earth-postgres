@@ -10,11 +10,16 @@ the data stale or missing but never makes a scrape hang:
   database   every PGMON_INTERVAL s: monitor/metrics.sql plus any
              monitor/custom/*.sql, as postgres over the container-local
              socket; and the free space on /data
-  backups    every PGMON_BACKUP_INTERVAL s: `pgbackrest info`, the scheduler's
-             status files, the latest restore-test result, and the size of
-             the repository (all on NFS)
+  sizes      every PGMON_SLOW_INTERVAL s: monitor/sizes.sql (database sizes,
+             whose cost grows with the number of files)
+  backups    every PGMON_SLOW_INTERVAL s: `pgbackrest info`, the scheduler's
+             status files and the latest restore-test result (all on NFS)
 
-Each source reports its own success (pg_up, pgmon_backup_probe_success). When
+Nothing here walks the data directory or the backup repository, so the cost
+of a collection does not grow with the size of the data.
+
+Each source reports its own success (pg_up, pgmon_sizes_probe_success,
+pgmon_backup_probe_success). When
 a source fails, its other metrics are left out rather than repeated stale.
 
 Standard library only; runs in the same image as the db and backup
@@ -34,13 +39,12 @@ from pathlib import Path
 
 PORT = int(os.environ.get("PGMON_PORT", "9187"))
 INTERVAL_S = int(os.environ.get("PGMON_INTERVAL", "60"))
-BACKUP_INTERVAL_S = int(os.environ.get("PGMON_BACKUP_INTERVAL", "300"))
+SLOW_INTERVAL_S = int(os.environ.get("PGMON_SLOW_INTERVAL", "300"))
 
 SQL_DIR = Path("/usr/local/lib/pgmon")
 CUSTOM_DIR = SQL_DIR / "custom"
 DATA_DIR = Path("/var/lib/postgresql")            # /data/postgres, read-only
 BACKUPS = Path("/backups")                        # /service/shire/backups, read-only
-REPO = BACKUPS / "pgbackrest"
 STATUS_DIR = BACKUPS / "status"
 RESTORE_TEST_DIR = BACKUPS / "restore-test"
 STANZA = "main"
@@ -112,6 +116,14 @@ def collect_database():
     return lines
 
 
+def collect_sizes():
+    try:
+        return psql(SQL_DIR / "sizes.sql", timeout=150) + ["pgmon_sizes_probe_success 1"]
+    except Exception as e:
+        log.warning("database sizes failed: %s", e)
+        return ["pgmon_sizes_probe_success 0"]
+
+
 # ── Backups ─────────────────────────────────────────────────────────────────
 
 def pgbackrest_info():
@@ -171,8 +183,6 @@ def restore_tests():
 def collect_backups():
     try:
         lines = pgbackrest_info() + status_files() + restore_tests()
-        # Everything in the repository: backups plus archived WAL.
-        lines.append(f'pgbackrest_repo_bytes {run(["du", "-sb", str(REPO)], 300).split()[0]}')
         lines.append("pgmon_backup_probe_success 1")
     except Exception as e:
         log.warning("backup metrics failed: %s", e)
@@ -204,7 +214,8 @@ class Source:
 
 
 SOURCES = [Source("database", collect_database, INTERVAL_S),
-           Source("backups", collect_backups, BACKUP_INTERVAL_S)]
+           Source("sizes", collect_sizes, SLOW_INTERVAL_S),
+           Source("backups", collect_backups, SLOW_INTERVAL_S)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -228,8 +239,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s pgmon %(levelname)s %(message)s")
     for s in SOURCES:
         threading.Thread(target=s.loop, name=s.name, daemon=True).start()
-    log.info("serving /metrics on port %d (database every %ds, backups every %ds)",
-             PORT, INTERVAL_S, BACKUP_INTERVAL_S)
+    log.info("serving /metrics on port %d (database every %ds, sizes and backups every %ds)",
+             PORT, INTERVAL_S, SLOW_INTERVAL_S)
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
 
 

@@ -25,7 +25,7 @@ COPY backup/pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
 COPY postgres/start.sh postgres/sync-roles.sh \
      backup/scheduler.sh backup/restore-test.sh \
      /usr/local/bin/
-COPY monitor/exporter.py monitor/metrics.sql /usr/local/lib/pgmon/
+COPY monitor/exporter.py monitor/metrics.sql monitor/sizes.sql /usr/local/lib/pgmon/
 COPY monitor/custom/ /usr/local/lib/pgmon/custom/
 RUN chmod -R a+rX /usr/local/lib/pgmon && \
     chmod 0644 /etc/postgresql/* /etc/pgbackrest/pgbackrest.conf && \

@@ -61,13 +61,14 @@ SELECT 'pg_waiting_on_lock ' || count(*)
  WHERE backend_type = 'client backend' AND wait_event_type = 'Lock';
 
 -- ── Per database ────────────────────────────────────────────────────────────
+-- (Sizes are in sizes.sql, on a slower schedule: pg_database_size() scales
+-- with the number of files.)
 SELECT format('%s{datname="%s"} %s', m.name,
               replace(replace(d.datname, '\', '\\'), '"', '\"'), m.val)
   FROM pg_database d
   JOIN pg_stat_database s ON s.datid = d.oid
  CROSS JOIN LATERAL (VALUES
-      ('pg_database_size_bytes',            pg_database_size(d.oid)::numeric),
-      ('pg_database_connections',           s.numbackends),
+      ('pg_database_connections',           s.numbackends::numeric),
       ('pg_database_xact_commit_total',     s.xact_commit),
       ('pg_database_xact_rollback_total',   s.xact_rollback),
       ('pg_database_blks_read_total',       s.blks_read),

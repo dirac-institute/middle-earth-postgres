@@ -105,7 +105,7 @@ services:
       TZ: America/Los_Angeles
       PGMON_PORT: "9187"
       PGMON_INTERVAL: "60"          # database metrics, seconds
-      PGMON_BACKUP_INTERVAL: "300"  # backup repository (NFS) metrics, seconds
+      PGMON_SLOW_INTERVAL: "300"    # database sizes and backup status, seconds
     volumes:
       # Read-only: only for the free space on /data, and to read backup
       # status. It talks to PostgreSQL over the shared socket.
