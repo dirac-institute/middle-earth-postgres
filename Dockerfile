@@ -1,31 +1,31 @@
-FROM docker.io/library/httpd:2.4
+# Stock PostgreSQL 18 plus pgBackRest. Both the db and backup containers run
+# this image; they differ only in entrypoint and mounts (see compose.yaml).
+#
+# The major version is pinned by the tag. Physical backups can only be
+# restored by the same major version, so changing this tag is a major-version
+# upgrade -- see BACKUP.md before touching it.
+FROM docker.io/library/postgres:18
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pgbackrest jq && \
+    rm -rf /var/lib/apt/lists/* /etc/pgbackrest.conf
 
 ARG SVC_UID
 ARG SVC_GID
 ARG SVC_USER
 
-RUN groupadd -g ${SVC_GID} ${SVC_USER} 2>/dev/null || true && \
-    useradd -u ${SVC_UID} -g ${SVC_GID} -M -s /sbin/nologin ${SVC_USER} 2>/dev/null || true && \
-    mkdir -p /srv/app /srv/static && \
-    chown -R ${SVC_UID}:${SVC_GID} /srv /usr/local/apache2/logs
+# A real passwd entry for the service uid: initdb, psql, and pgBackRest all
+# look up the current user's name.
+RUN groupadd -g ${SVC_GID} ${SVC_USER} && \
+    useradd -u ${SVC_UID} -g ${SVC_GID} -M -d /var/lib/postgresql -s /usr/sbin/nologin ${SVC_USER}
 
-COPY app/requirements.txt /srv/app/requirements.txt
-RUN pip install --no-cache-dir --break-system-packages -r /srv/app/requirements.txt
+COPY postgres/postgresql.conf postgres/pg_hba.conf /etc/postgresql/
+COPY backup/pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
+COPY postgres/start.sh postgres/sync-roles.sh \
+     backup/scheduler.sh backup/restore-test.sh \
+     /usr/local/bin/
+RUN chmod 0644 /etc/postgresql/* /etc/pgbackrest/pgbackrest.conf && \
+    chmod 0755 /usr/local/bin/start.sh /usr/local/bin/sync-roles.sh \
+               /usr/local/bin/scheduler.sh /usr/local/bin/restore-test.sh
 
-COPY app/server.py /srv/app/server.py
-COPY app/static/   /srv/static/
-
-COPY apache/httpd.conf /usr/local/apache2/conf/extra/httpd-custom.conf
-RUN sed -i 's/^Listen 80$/#Listen 80/' /usr/local/apache2/conf/httpd.conf && \
-    echo 'Include conf/extra/httpd-custom.conf' >> /usr/local/apache2/conf/httpd.conf
-
-COPY start.sh /usr/local/bin/start.sh
-RUN chmod +x /usr/local/bin/start.sh
-
-EXPOSE 8080
-
-CMD ["/usr/local/bin/start.sh"]
+ENV PGBACKREST_CONFIG=/etc/pgbackrest/pgbackrest.conf

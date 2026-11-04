@@ -1,32 +1,85 @@
-# Middle-earth service example.
+# Middle-earth PostgreSQL.
 #
+#   sudo ./init.sh               # once per VM; safe to re-run
 #   podman compose up -d --build
 #
-# Apache serves static files and proxies API requests to a Python backend,
-# all in one container on port 8080. The VM's reverse proxy handles TLS
-# termination and routes traffic here.
+# Two containers from one image (Dockerfile = postgres:18 + pgBackRest):
+#   db      PostgreSQL on the VM's port 5432, data in /data/postgres
+#   backup  pgBackRest scheduler; repository in /service/shire/backups
 #
-# SVC_USER, SVC_UID, SVC_GID, and SVC_FQDN must be set in .env in production
-# (written by init.sh from service.conf). There are no defaults; missing
-# values will cause podman compose to fail.
+# SVC_USER, SVC_UID, SVC_GID must be set in .env (written by init.sh from
+# service.conf). There are no defaults; missing values make compose fail.
 
 services:
-  app:
+  db:
     build:
       context: .
-      dockerfile: Dockerfile
       args:
         SVC_UID: "${SVC_UID}"
         SVC_GID: "${SVC_GID}"
         SVC_USER: "${SVC_USER}"
-    image: middle-earth-example/app:latest
-    container_name: example-app
-    hostname: "${SVC_FQDN}"
-    environment:
-      SERVER_NAME: "${SVC_FQDN}"
-    ports:
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
+    image: middle-earth-postgres/postgres:18
+    container_name: pg-db
+    entrypoint: ["/usr/local/bin/start.sh"]
     user: "${SVC_UID}:${SVC_GID}"
+    # Host networking: PostgreSQL listens directly on the VM's port 5432, so
+    # the firewalld rule from init.sh is what governs access. (A published
+    # port would be DNAT'd by netavark, which firewalld lets through
+    # regardless of zone rules.)
+    network_mode: host
+    shm_size: 1g
+    # Run a tiny init (catatonit) as PID 1. pgBackRest's async archiver and
+    # the role sync detach into the background; without an init they would
+    # be reparented to postgres, which treats any unknown child exiting
+    # non-zero as a crashed backend and restarts the whole server.
+    init: true
+    # SIGINT (the image's stop signal) = fast shutdown; give it time to finish
+    # the shutdown checkpoint instead of being killed.
+    stop_grace_period: 300s
+    environment:
+      TZ: America/Los_Angeles
+    volumes:
+      # Bind sources must already exist -- init.sh creates them. If /data is
+      # not mounted, /data/postgres does not exist and the container refuses
+      # to start rather than initializing an empty cluster on the root disk.
+      - /data/postgres:/var/lib/postgresql
+      - /service/shire/secrets:/run/secrets/postgres:ro
+      - /service/shire/backups:/backups
+      - pgsocket:/var/run/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-h", "/var/run/postgresql", "-U", "postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
     labels:
-      idac.service: example-app
+      idac.service: pg-db
+
+  backup:
+    image: middle-earth-postgres/postgres:18
+    container_name: pg-backup
+    # No depends_on: podman-compose turns it into a hard podman dependency
+    # that blocks recreating db on its own. scheduler.sh waits for the db.
+    entrypoint: ["/usr/local/bin/scheduler.sh"]
+    init: true
+    user: "${SVC_UID}:${SVC_GID}"
+    network_mode: none
+    environment:
+      TZ: America/Los_Angeles
+      BACKUP_TIME: "01:00"
+      FULL_BACKUP_DAY: "7"      # ISO weekday, 7 = Sunday
+      RESTORE_TEST: monthly     # monthly | weekly | off
+    volumes:
+      # Read-only: backups read the data directory, never write it.
+      - /data/postgres:/var/lib/postgresql:ro
+      - /service/shire/backups:/backups
+      - /service/shire/restore-scratch:/restore-scratch
+      - pgsocket:/var/run/postgresql
+    restart: unless-stopped
+    labels:
+      idac.service: pg-backup
+
+volumes:
+  # Shared Unix socket directory, so the backup container can reach the db
+  # without any network credentials.
+  pgsocket:

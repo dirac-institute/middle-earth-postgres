@@ -1,144 +1,141 @@
-# Deploying the Middle-earth service example to a DiRAC VM
+# Deploying Middle-earth PostgreSQL to a DiRAC VM
 
-Target: stock Rocky 10 VM on UW DiRAC infrastructure.
-
-The VM provides a reverse proxy that handles TLS termination and routes
-traffic to your container on port 8080.
+Target: stock Rocky 10 VM on UW DiRAC infrastructure, with a `/data`
+partition and the service's `/service/shire` NFS share mounted.
 
 ```bash
-git clone <this repo> /root/middle-earth-service-example
-cd /root/middle-earth-service-example
+git clone <this repo> /root/middle-earth-postgres
+cd /root/middle-earth-postgres
 sudo ./init.sh
 podman compose up -d --build
 ```
 
+Restoring onto a new VM after losing the old one? Run `./restore.sh` between
+`init.sh` and `podman compose up` -- see `BACKUP.md`.
+
 Then verify:
 
 ```bash
-curl http://localhost:8080/api/hello
-# {"message":"Hello from Middle-earth!","service":"example"}
-
-curl http://localhost:8080/
-# (static HTML page)
+podman ps                       # pg-db (healthy) and pg-backup, both Up
+podman logs pg-db | grep sync-roles
+#   sync-roles: roles postgres, owner, readwrite, readonly, replication are in sync ...
+podman logs pg-backup | grep scheduler
+#   scheduler: ... full backup complete / next backup in ...
 ```
+
+and from another machine:
+
+```bash
+psql "host=$(hostname -f) user=readonly dbname=postgres" -c 'select 1'
+```
+
+## Updating
+
+After pulling changes to the repo (or editing `postgresql.conf`,
+`pg_hba.conf`, `pgbackrest.conf`, or the scripts, which are all baked into
+the image):
+
+```bash
+podman compose up -d --build --force-recreate
+```
+
+`--force-recreate` matters: podman-compose rebuilds the image on `--build`
+but keeps running the old containers unless told to recreate them.
 
 ## What each piece does
 
 | File | Role |
 |---|---|
-| `service.conf` | Single source of truth for the service account name, uid, and gid. Committed to the repo. Everything else reads from here. |
-| `init.sh` | Host-level only: checks the service account matches `service.conf`, installs podman + podman-compose, enables `podman-restart.service`, writes `.env`. Idempotent; safe to re-run. |
-| `Dockerfile` | Apache httpd 2.4 + Python 3 + Flask/Gunicorn in one image. Apache serves static files and reverse-proxies `/api/` to Gunicorn. |
-| `start.sh` | Container entrypoint: starts Gunicorn in the background, then runs Apache in the foreground. |
-| `compose.yaml` | One service: `app` (Apache + Gunicorn in one container on port 8080). |
-| `app/server.py` | Flask application with one API endpoint (`GET /api/hello`). |
-| `app/static/index.html` | Static HTML page served directly by Apache. |
-| `apache/httpd.conf` | Apache virtual host: plain HTTP on 8080, static files from `/srv/static`, `/api/` proxied to Gunicorn on `127.0.0.1:8000`. |
-| `start.sh` | Container entrypoint: starts Gunicorn in the background, then runs Apache in the foreground. |
-| `dev-startup.sh` | Local development helper: exports environment variables and runs `docker compose` on macOS. |
-| `SECRETS.md` | How secrets are stored, the NFS ownership model, and permissions. |
+| `service.conf` | Single source of truth for the service account name, uid, and gid. |
+| `init.sh` | Host-level only: checks the service account, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
+| `Dockerfile` | `postgres:18` + pgBackRest, the service user, and the config/scripts below. One image for both containers. |
+| `compose.yaml` | Two services: `db` (PostgreSQL) and `backup` (pgBackRest scheduler). |
+| `postgres/postgresql.conf` | Server configuration: listen on 5432, memory sizing, WAL archiving to pgBackRest. |
+| `postgres/pg_hba.conf` | Client authentication: SCRAM passwords for all network logins; replication only for the `replication` role. |
+| `postgres/start.sh` | db entrypoint: checks the password files, starts the role sync, hands off to the stock postgres entrypoint. |
+| `postgres/sync-roles.sh` | Creates the five roles if missing and sets their passwords from the secrets files. Never drops anything. |
+| `backup/pgbackrest.conf` | Backup repository location, retention, compression, async archiving. |
+| `backup/scheduler.sh` | backup entrypoint: nightly backups, weekly verify, monthly restore test. |
+| `backup/restore-test.sh` | Restores the latest backup to scratch space, replays WAL, checks every database, cleans up. |
+| `restore.sh` | Disaster recovery: rebuilds `/data/postgres` from the backup repository. |
 
 ## Architecture
 
 ```
-                   ┌──────────────────────────────────────────┐
-  VM reverse  ──►  │  container                                │
-  proxy :8080      │    apache (port 8080)                     │
-                   │      /         → static files             │
-                   │      /api/*    → gunicorn (port 8000)     │
-                   └──────────────────────────────────────────┘
+            network :5432 (firewalld: service "postgresql")
+                         │
+   ┌─────────────────────▼──────────────┐      ┌──────────────────────────────┐
+   │ pg-db   (host network)             │      │ pg-backup   (no network)     │
+   │   postgres 18                      │      │   scheduler.sh → pgbackrest  │
+   │   archive_command → pgbackrest ────┼──┐   │     backup / verify /        │
+   │                                    │  │   │     restore-test             │
+   │   unix socket ◄────────────────────┼──┼───┤   (via shared socket volume) │
+   └──────┬─────────────────────────────┘  │   └──────┬──────────────┬────────┘
+          │ rw                             │          │ ro           │
+   /data/postgres  ◄───────────────────────┼──────────┘              │
+          (VM disk)                        ▼                         ▼
+                              /service/shire/backups   /service/shire/restore-scratch
+                                    (NFS, off-VM)
 ```
 
 ## Design choices
 
-**One container, two processes.** Apache and Gunicorn run in the same
-container. Apache handles static files and reverse-proxies API requests to
-Gunicorn on an internal port. The `start.sh` entrypoint launches Gunicorn in
-the background and runs Apache in the foreground as PID 1.
+**Stock image, minimal additions.** The image is the official `postgres:18`
+plus the pgBackRest package. The stock entrypoint handles first-time
+`initdb`; it only does so when the data directory has no `PG_VERSION`, so an
+existing cluster is never re-initialized.
 
-**Containers for everything.** The only things `init.sh` does on the host are
-check the service account and install podman. The service account, SSH, and
-SELinux are provisioned by IT.
-All application logic, dependencies, and configuration live inside the
-container image. This means a deployment is fully reproducible from the repo
-checkout.
+**Host networking.** PostgreSQL listens directly on the VM's port 5432 and
+firewalld decides who can reach it. With a published port instead, podman's
+netavark DNATs the traffic and firewalld accepts DNAT'd connections
+regardless of zone rules -- the firewall would not actually apply.
 
-**Secrets are bind-mounted, never baked in.** Any secrets the service needs
-are mounted read-only into the container at runtime. See `SECRETS.md` for the
-full story.
+**An init process as PID 1** (`init: true`). pgBackRest's async archiver
+detaches background processes. Without an init they are reparented to
+PostgreSQL, which treats an unknown child exiting non-zero as a crashed
+backend and restarts the whole server.
 
-**Service account with fixed uid/gid.** The service account name, uid, and gid
-are defined once in `service.conf` and flow into every other file — init.sh,
-the Dockerfile, and compose.yaml all read from it with no fallback defaults.
-The uid/gid must match the owner of secrets on the production NFS share, which
-is exported with `root_squash` — only that uid can read mode-0600 secrets. See
-`SECRETS.md` for details on why this matters.
+**No databases in the repo.** The framework is agnostic to which databases
+exist. Roles are cluster-wide and use PostgreSQL's predefined
+`pg_read_all_data` / `pg_write_all_data` roles, so new databases are covered
+automatically with no grants to maintain.
 
-**Port 8080, localhost only.** The container listens on port 8080 and the
-compose file binds it to `127.0.0.1:8080`. The VM's reverse proxy handles
-TLS termination and routes external traffic to this port.
+**Passwords are files, files are authoritative.** See `SECRETS.md`.
 
-## Service identity: `service.conf`
+**Backups off the VM, verified by restoring.** See `BACKUP.md`.
 
-`service.conf` is the single source of truth for the service account:
+**Guards against data loss.** The `/data/postgres` bind source is created by
+`init.sh` only after checking `/data` is a mount point; if the partition is
+ever missing, the container fails to start instead of initializing an empty
+cluster on the root disk. `init.sh` never deletes, overwrites, or recursively
+chowns. `restore.sh` refuses to run with the db up or the data directory
+non-empty, and pgBackRest itself refuses to restore over files (no `delta`)
+or to archive into a repository that belongs to a different cluster.
 
-```
-SVC_USER=astro-svc
-SVC_UID=1725455
-SVC_GID=2121725455
-```
+## Service identity and `.env`
 
-It is committed to the repo. `init.sh` reads it, exits if the account does
-not exist on the VM with that uid and primary gid, and writes the values into
-`.env` alongside the per-host FQDN. The Dockerfile and compose.yaml consume
-these values via build args and environment variables with no hardcoded
-defaults — if `service.conf` is missing or incomplete, `init.sh` exits
-immediately, and running `podman compose` without a populated `.env` will
-fail on the missing variables.
-
-## Per-host configuration: `.env`
-
-The only per-machine value is the host's own FQDN, which compose.yaml uses
-as the Apache `ServerName` and container hostname. `init.sh` writes it (along
-with the `service.conf` values) to `.env`, which podman compose reads
-automatically:
-
-```
-SVC_USER=astro-svc
-SVC_UID=1725455
-SVC_GID=2121725455
-SVC_FQDN=myhost.astro.washington.edu
-```
-
-`.env` is gitignored and must never be copied between hosts.
+`service.conf` defines `SVC_USER`, `SVC_UID`, `SVC_GID`. `init.sh` checks the
+account exists on the VM with exactly those ids and writes them to `.env`,
+which podman compose reads. The image is built with a matching user and both
+containers run as that uid. `.env` is gitignored and per-host.
 
 ## VM infrastructure context
 
-DiRAC VMs run Rocky 10 and use podman (not Docker) as the container runtime.
-Key things to know:
+- **podman-compose** (from EPEL, installed by `init.sh`) is the compose
+  frontend behind `podman compose`.
+- **podman-restart.service** must be enabled for `restart: unless-stopped`
+  to survive a reboot. `init.sh` enables it.
+- **firewalld**: `init.sh` adds the `postgresql` service (5432/tcp) to the
+  default zone. To restrict which networks can connect, replace that with a
+  rich rule or a zone with `--add-source` ranges.
+- **`/service/shire`** is NFS exported with `root_squash`: root on the VM is
+  `nobody` there. Anything that touches it runs as the service account.
+- **SELinux** is configured by IT. If it is enforcing, the bind mounts may
+  need relabeling (`:Z`) and NFS access may need the `virt_use_nfs` boolean.
 
-- **podman-compose** is the compose frontend. It reads the same `compose.yaml`
-  format as `docker compose`. Install it from EPEL; `init.sh` handles this.
-- **podman-restart.service** must be enabled for `restart: unless-stopped` to
-  survive a VM reboot. `init.sh` enables it.
-- **The VM's reverse proxy** handles TLS termination and firewall rules.
-  The container listens on `127.0.0.1:8080` and does not need to manage TLS or
-  open ports itself.
-- **Service accounts** exist because the NFS share uses `root_squash`. The
-  container process must run as the uid that owns the secrets on the share.
-  IT creates this account on the VM; `init.sh` checks that it matches
-  `service.conf` and exits if it does not.
+## Sizing
 
-## Rollout to another VM
-
-The procedure above is the whole deployment. On a new VM, confirm:
-
-- The service account in `service.conf` exists on the VM (IT provisions it).
-- The VM has network access to pull container base images.
-- For production: if the service has secrets, `/service/shire` is mounted and
-  the secrets directory is populated (see `SECRETS.md`).
-
-## Boot persistence
-
-`restart: unless-stopped` only survives reboot if `podman-restart.service` is
-enabled, which `init.sh` does.
+`postgresql.conf` is sized for the current VM (8 cores, ~46 GB RAM:
+`shared_buffers = 8GB`, `effective_cache_size = 24GB`). Adjust for other VMs.
+`/data` needs room for the database plus WAL that piles up if
+`/service/shire` is unreachable (WAL is kept until it has been archived).
