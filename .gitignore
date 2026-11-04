@@ -1,2 +1,3 @@
 # Written per-host by init.sh; must never be shared between hosts.
 .env
+__pycache__/
