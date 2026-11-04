@@ -27,6 +27,18 @@ services:
     # port would be DNAT'd by netavark, which firewalld lets through
     # regardless of zone rules.)
     network_mode: host
+    # Size of the container's /dev/shm (podman defaults to 64 MB). PostgreSQL
+    # uses /dev/shm for dynamic shared memory: parallel query workers pass
+    # tuples and build shared hash tables there (parallel hash joins, parallel
+    # index builds). If it is too small, big parallel queries fail with
+    # "could not resize shared memory segment ... No space left on device".
+    # shared_buffers does NOT live here (it is anonymous mmap), so this does
+    # not need to scale with shared_buffers.
+    #
+    # It is a RAM-backed tmpfs cap, consumed only while in use. Tune per VM
+    # alongside work_mem and max_parallel_workers in postgresql.conf: roughly
+    # work_mem x parallel workers x concurrent parallel queries, with
+    # headroom. 1g is comfortable for the current ~46 GB VM.
     shm_size: 1g
     # Run a tiny init (catatonit) as PID 1. pgBackRest's async archiver and
     # the role sync detach into the background; without an init they would

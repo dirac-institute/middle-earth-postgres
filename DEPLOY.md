@@ -137,5 +137,7 @@ containers run as that uid. `.env` is gitignored and per-host.
 
 `postgresql.conf` is sized for the current VM (8 cores, ~46 GB RAM:
 `shared_buffers = 8GB`, `effective_cache_size = 24GB`). Adjust for other VMs.
+The db container's `shm_size` in `compose.yaml` (1g) is related: it caps the
+`/dev/shm` space parallel queries use, and is explained in a comment there.
 `/data` needs room for the database plus WAL that piles up if
 `/service/shire` is unreachable (WAL is kept until it has been archived).
