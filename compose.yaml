@@ -3,9 +3,10 @@
 #   sudo ./init.sh               # once per VM; safe to re-run
 #   podman compose up -d --build
 #
-# Two containers from one image (Dockerfile = postgres:18 + pgBackRest):
-#   db      PostgreSQL on the VM's port 5432, data in /data/postgres
-#   backup  pgBackRest scheduler; repository in /service/shire/backups
+# Three containers from one image (Dockerfile = postgres:18 + pgBackRest):
+#   db       PostgreSQL on the VM's port 5432, data in /data/postgres
+#   backup   pgBackRest scheduler; repository in /service/shire/backups
+#   monitor  metrics endpoint on the VM's port 9187, for the gadget monitor
 #
 # SVC_USER, SVC_UID, SVC_GID must be set in .env (written by init.sh from
 # service.conf). There are no defaults; missing values make compose fail.
@@ -91,7 +92,31 @@ services:
     labels:
       idac.service: pg-backup
 
+  monitor:
+    image: middle-earth-postgres/postgres:18
+    container_name: pg-monitor
+    entrypoint: ["python3", "-u", "/usr/local/lib/pgmon/exporter.py"]
+    init: true
+    user: "${SVC_UID}:${SVC_GID}"
+    # Host networking, like db: the firewalld rule from init.sh decides who
+    # can reach port 9187.
+    network_mode: host
+    environment:
+      TZ: America/Los_Angeles
+      PGMON_PORT: "9187"
+      PGMON_INTERVAL: "60"          # database metrics, seconds
+      PGMON_SLOW_INTERVAL: "300"    # database sizes and backup status, seconds
+    volumes:
+      # Read-only: only for the free space on /data, and to read backup
+      # status. It talks to PostgreSQL over the shared socket.
+      - /data/postgres:/var/lib/postgresql:ro
+      - /service/shire/backups:/backups:ro
+      - pgsocket:/var/run/postgresql
+    restart: unless-stopped
+    labels:
+      idac.service: pg-monitor
+
 volumes:
-  # Shared Unix socket directory, so the backup container can reach the db
-  # without any network credentials.
+  # Shared Unix socket directory, so the backup and monitor containers can
+  # reach the db without any network credentials.
   pgsocket:

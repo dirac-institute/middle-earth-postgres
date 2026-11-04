@@ -1,5 +1,6 @@
-# Stock PostgreSQL 18 plus pgBackRest. Both the db and backup containers run
-# this image; they differ only in entrypoint and mounts (see compose.yaml).
+# Stock PostgreSQL 18 plus pgBackRest (and python3 for the monitoring
+# endpoint). The db, backup and monitor containers all run this image; they
+# differ only in entrypoint and mounts (see compose.yaml).
 #
 # The major version is pinned by the tag. Physical backups can only be
 # restored by the same major version, so changing this tag is a major-version
@@ -7,7 +8,7 @@
 FROM docker.io/library/postgres:18
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pgbackrest jq && \
+    apt-get install -y --no-install-recommends pgbackrest jq python3 && \
     rm -rf /var/lib/apt/lists/* /etc/pgbackrest.conf
 
 ARG SVC_UID
@@ -24,7 +25,10 @@ COPY backup/pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
 COPY postgres/start.sh postgres/sync-roles.sh \
      backup/scheduler.sh backup/restore-test.sh \
      /usr/local/bin/
-RUN chmod 0644 /etc/postgresql/* /etc/pgbackrest/pgbackrest.conf && \
+COPY monitor/exporter.py monitor/metrics.sql monitor/sizes.sql /usr/local/lib/pgmon/
+COPY monitor/custom/ /usr/local/lib/pgmon/custom/
+RUN chmod -R a+rX /usr/local/lib/pgmon && \
+    chmod 0644 /etc/postgresql/* /etc/pgbackrest/pgbackrest.conf && \
     chmod 0755 /usr/local/bin/start.sh /usr/local/bin/sync-roles.sh \
                /usr/local/bin/scheduler.sh /usr/local/bin/restore-test.sh
 

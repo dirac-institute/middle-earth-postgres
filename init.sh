@@ -93,18 +93,27 @@ systemctl enable --now podman-restart.service >/dev/null 2>&1 \
 # ── Firewall ────────────────────────────────────────────────────────────────
 echo
 echo "== Firewall =="
-# The db container uses host networking, so this rule is what lets clients
-# on the network reach PostgreSQL on port 5432.
+# The db and monitor containers use host networking, so these rules are what
+# let clients on the network reach PostgreSQL (5432) and the metrics (9187).
 if systemctl is-active --quiet firewalld; then
     if firewall-cmd --quiet --query-service=postgresql --permanent; then
         echo "  ok   postgresql (5432/tcp) already allowed"
     else
         firewall-cmd --quiet --permanent --add-service=postgresql
-        firewall-cmd --quiet --reload
+        reload=1
         echo "  ok   postgresql (5432/tcp) allowed in the default zone"
     fi
+    # The monitoring endpoint (pg-monitor), polled by the gadget monitor.
+    if firewall-cmd --quiet --query-port=9187/tcp --permanent; then
+        echo "  ok   monitoring endpoint (9187/tcp) already allowed"
+    else
+        firewall-cmd --quiet --permanent --add-port=9187/tcp
+        reload=1
+        echo "  ok   monitoring endpoint (9187/tcp) allowed in the default zone"
+    fi
+    [ -z "${reload:-}" ] || firewall-cmd --quiet --reload
 else
-    warn "firewalld is not running; port 5432 is not being managed by this script"
+    warn "firewalld is not running; ports 5432 and 9187 are not being managed by this script"
 fi
 
 # ── Data directory ──────────────────────────────────────────────────────────

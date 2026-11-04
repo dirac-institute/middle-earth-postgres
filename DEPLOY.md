@@ -16,7 +16,7 @@ Restoring onto a new VM after losing the old one? Run `./restore.sh` between
 Then verify:
 
 ```bash
-podman ps                       # pg-db (healthy) and pg-backup, both Up
+podman ps                       # pg-db (healthy), pg-backup and pg-monitor, all Up
 podman logs pg-db | grep sync-roles
 #   sync-roles: roles postgres, owner, readwrite, readonly, replication are in sync ...
 podman logs pg-backup | grep scheduler
@@ -27,6 +27,8 @@ and from another machine:
 
 ```bash
 psql "host=$(hostname -f) user=readonly dbname=postgres" -c 'select 1'
+curl -s http://$(hostname -f):9187/metrics | grep -E '^pg_up|probe_success'
+#   pg_up 1 / pgmon_backup_probe_success 1
 ```
 
 ## Updating
@@ -47,9 +49,9 @@ but keeps running the old containers unless told to recreate them.
 | File | Role |
 |---|---|
 | `service.conf` | Single source of truth for the service account name, uid, and gid. |
-| `init.sh` | Host-level only: checks the service account, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
+| `init.sh` | Host-level only: checks the service account, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
 | `Dockerfile` | `postgres:18` + pgBackRest, the service user, and the config/scripts below. One image for both containers. |
-| `compose.yaml` | Two services: `db` (PostgreSQL) and `backup` (pgBackRest scheduler). |
+| `compose.yaml` | Three services: `db` (PostgreSQL), `backup` (pgBackRest scheduler) and `monitor` (metrics endpoint). |
 | `postgres/postgresql.conf` | Server configuration: listen on 5432, memory sizing, WAL archiving to pgBackRest. |
 | `postgres/pg_hba.conf` | Client authentication: SCRAM passwords for all network logins; replication only for the `replication` role. |
 | `postgres/start.sh` | db entrypoint: checks the password files, starts the role sync, hands off to the stock postgres entrypoint. |
@@ -58,6 +60,8 @@ but keeps running the old containers unless told to recreate them.
 | `backup/scheduler.sh` | backup entrypoint: nightly backups, weekly verify, monthly restore test. |
 | `backup/restore-test.sh` | Restores the latest backup to scratch space, replays WAL, checks every database, cleans up. |
 | `restore.sh` | Disaster recovery: rebuilds `/data/postgres` from the backup repository. |
+| `monitor/exporter.py`, `monitor/metrics.sql` | Metrics endpoint on port 9187 for the gadget monitor; see `MONITORING.md`. |
+| `monitor/custom/` | Deployment-specific metric queries (empty in the template). |
 
 ## Architecture
 
@@ -77,6 +81,10 @@ but keeps running the old containers unless told to recreate them.
                               /service/shire/backups   /service/shire/restore-scratch
                                     (NFS, off-VM)
 ```
+
+Not drawn: `pg-monitor` (host network, port 9187) reads PostgreSQL over the
+same shared socket and the backup repository read-only, and serves metrics
+for the gadget monitor (see `MONITORING.md`).
 
 ## Design choices
 
@@ -125,8 +133,8 @@ containers run as that uid. `.env` is gitignored and per-host.
   frontend behind `podman compose`.
 - **podman-restart.service** must be enabled for `restart: unless-stopped`
   to survive a reboot. `init.sh` enables it.
-- **firewalld**: `init.sh` adds the `postgresql` service (5432/tcp) to the
-  default zone. To restrict which networks can connect, replace that with a
+- **firewalld**: `init.sh` adds the `postgresql` service (5432/tcp) and the
+  metrics endpoint (9187/tcp) to the default zone. To restrict which networks can connect, replace that with a
   rich rule or a zone with `--add-source` ranges.
 - **`/service/shire`** is NFS exported with `root_squash`: root on the VM is
   `nobody` there. Anything that touches it runs as the service account.
