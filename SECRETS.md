@@ -1,56 +1,68 @@
-# Secrets layout
+# Secrets
 
 No secret is ever committed to this repo or baked into a container image.
 
-This example does not use any secrets, but real services typically will. This
-document describes the pattern for handling secrets on DiRAC VM infrastructure.
+The only secrets are the passwords of the five PostgreSQL roles. Each is one
+file on the `/service/shire` NFS share, bind-mounted read-only into the db
+container at `/run/secrets/postgres/`:
 
-## How secrets are stored
+```
+/service/shire/secrets/              0700  $SVC_USER
+/service/shire/secrets/postgres      0600  $SVC_USER
+/service/shire/secrets/owner         0600  $SVC_USER
+/service/shire/secrets/readwrite     0600  $SVC_USER
+/service/shire/secrets/readonly      0600  $SVC_USER
+/service/shire/secrets/replication   0600  $SVC_USER
+```
 
-Secrets are placed on the `/service/shire` NFS share and bind-mounted
-read-only into the container at runtime. The compose file uses a volume mount
-to make them available inside the container without baking them into the image.
+Each file contains just the password. A trailing newline is ignored.
 
-Example compose volume entry:
+## The files are authoritative
 
-```yaml
-volumes:
-  - "/service/shire/<service>/secrets:/app/secrets:ro"
+Every time the db container starts, `postgres/sync-roles.sh` sets each role's
+password from its file (and creates the role if it is missing). Whatever is
+in the files is what the passwords are; a password changed from inside
+PostgreSQL with `ALTER ROLE` reverts at the next restart.
+
+`init.sh` generates a random password for any file that does not exist. It
+never overwrites an existing file.
+
+## Changing a password
+
+```bash
+sudo -u $SVC_USER sh -c 'umask 077 && cat > /service/shire/secrets/readonly'
+# type the new password, then Ctrl-D
+
+podman compose up -d --force-recreate db
+podman logs pg-db | grep sync-roles      # confirm the sync ran
+```
+
+Recreating the db container is a brief outage (a few seconds).
+
+## Reading a password
+
+```bash
+sudo -u $SVC_USER cat /service/shire/secrets/readonly
 ```
 
 ## Ownership and root_squash
 
 `/service/shire` is exported with `root_squash`, so **root on the VM cannot
-write to it** — root is mapped to `nobody`. The tree is owned by the service
-account whose name, uid, and gid are defined in `service.conf`.
-
-To place or update secrets, become that user (use the name from `service.conf`):
-
-```bash
-sudo -u $SVC_USER install -m 0600 /path/to/secret \
-    /service/shire/<service>/secrets/my-secret
-```
-
-IT creates this account on the VM, and `init.sh` checks that it matches
-`service.conf`. If the account is not available by name, use the numeric ids
-from `service.conf` instead:
+read or write these files** -- root is mapped to `nobody`. Use the service
+account named in `service.conf`. If the account is not available by name, use
+the numeric ids:
 
 ```bash
 setpriv --reuid=$SVC_UID --regid=$SVC_GID --clear-groups \
-    install -m 0600 /path/to/secret /service/shire/<service>/secrets/my-secret
+    cat /service/shire/secrets/readonly
 ```
 
-The container must *run* as that uid, or it cannot read mode-0600 files on the
-share. The image creates a user with that uid/gid and the compose file sets
-`user:` accordingly. All three values come from `service.conf` with no
-hardcoded defaults.
+The containers run as that uid for the same reason: it is the only identity
+that can read the password files and write the backup repository.
 
-## Permissions
+## What is not secret
 
-Secret files should be owned by the service account and have restrictive
-permissions:
-
-```
-/service/shire/<service>/secrets/                0755  $SVC_USER
-/service/shire/<service>/secrets/<secret-file>   0600  $SVC_USER
-```
+The pgBackRest repository in `/service/shire/backups` is not encrypted. It
+contains a full copy of the database, including the roles' password
+*hashes* (SCRAM verifiers). It is protected by the same NFS ownership as the
+secrets.
