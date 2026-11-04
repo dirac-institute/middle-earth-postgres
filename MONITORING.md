@@ -32,7 +32,9 @@ endpoint.
 When a source fails (PostgreSQL down, shire unreachable), its success metric
 goes to 0 (`pg_up`, `pgmon_backup_probe_success`) and its other metrics are
 left out rather than repeated stale. `pgmon_collect_age_seconds{source}`
-grows if a collection is stuck.
+grows if a collection is stuck. Because the endpoint serves the latest
+collection, every value can be up to one interval old: after PostgreSQL
+stops, `pg_up` reads 1 until the next database collection.
 
 The endpoint has no authentication: the metrics are counts and sizes,
 database and role names. `init.sh` opens 9187/tcp in firewalld; to limit it to
