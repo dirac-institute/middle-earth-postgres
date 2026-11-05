@@ -197,7 +197,7 @@ stops with an error, and so would the image build and PostgreSQL itself.
 ## Sizing
 
 Memory is sized per VM in `postgres/hosts/<hostname>.conf` (for mpg, 8 cores
-and ~46 GB RAM: `shared_buffers = 8GB`, `effective_cache_size = 24GB`). The db
+and ~48 GB RAM: `shared_buffers = 12GB`, `effective_cache_size = 36GB`). The db
 container's `/dev/shm`, which parallel queries use, is allowed all of the
 VM's RAM (`init.sh` sets `PG_SHM_SIZE` from `/proc/meminfo`): it uses memory
 only while in use, and PostgreSQL's own settings are what limit memory.
