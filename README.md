@@ -73,7 +73,8 @@ psql "host=<vm fqdn> user=owner dbname=postgres" -c 'CREATE DATABASE mydb'
 
 - **A Rocky 10 VM** with root, a `/data` partition sized for the database
   (plus WAL headroom), and the service's `/service/shire` NFS share mounted.
-- **A service account** created on the VM by IT, matching `service.conf`.
+- **A service account** created on the VM by IT, and `/root/VM.set` naming
+  it (IT writes this when provisioning the VM).
   `/service/shire` is exported with `root_squash`, so only this uid can
   read the secrets and write the backups.
 - **Network access** to pull container images during the build.

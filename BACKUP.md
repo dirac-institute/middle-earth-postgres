@@ -96,7 +96,11 @@ Set `RESTORE_TEST_AMCHECK=no` in the backup service's environment to skip the
 
 Starting point: a fresh VM with `/data` and the same `/service/shire` share
 mounted (if the share is different, copy the old `backups/` and `secrets/`
-directories into it first, as the service account).
+directories into it first, as the service account), and IT's `/root/VM.set`.
+
+If the new VM has a different hostname, add `postgres/hosts/<new hostname>.conf`
+first (copy the old host's file and adjust the memory settings for the new
+VM's RAM). `init.sh` stops without it.
 
 ```bash
 git clone <this repo> /root/middle-earth-postgres

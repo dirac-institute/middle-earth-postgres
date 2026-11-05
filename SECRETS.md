@@ -68,7 +68,7 @@ sudo -u $SVC_USER sh -c 'f=/service/shire/secrets/readonly; [ -z "$(tail -c1 "$f
 
 `/service/shire` is exported with `root_squash`, so **root on the VM cannot
 read or write these files** -- root is mapped to `nobody`. Use the service
-account named in `service.conf`. If the account is not available by name, use
+account named in `/root/VM.set` (`VMUSER`). If the account is not available by name, use
 the numeric ids:
 
 ```bash
