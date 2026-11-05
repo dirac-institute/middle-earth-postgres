@@ -158,7 +158,9 @@ for role in "${ROLES[@]}"; do
             || warn "$f has mode/owner '$perms'; expected '600 $SVC_UID'"
         echo "  ok   $f exists"
     else
-        openssl rand -base64 32 | tr -d '/+=\n' | head -c 32 \
+        # End with a newline so `cat` prints the password on its own line;
+        # sync-roles.sh strips it.
+        { openssl rand -base64 32 | tr -d '/+=\n' | head -c 32; echo; } \
             | as_svc sh -c "umask 077 && cat > '$f'"
         echo "  ok   generated random password in $f"
     fi
