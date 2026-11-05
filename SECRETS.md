@@ -15,7 +15,10 @@ container at `/run/secrets/postgres/`:
 /service/shire/secrets/replication   0600  $SVC_USER
 ```
 
-Each file contains just the password. A trailing newline is ignored.
+Each file contains just the password, followed by a newline (the files
+`init.sh` generates end with one). The trailing newline is not part of the
+password: `sync-roles.sh` strips it, so a file with or without one gives the
+same password.
 
 ## The files are authoritative
 
@@ -43,6 +46,22 @@ Recreating the db container is a brief outage (a few seconds).
 
 ```bash
 sudo -u $SVC_USER cat /service/shire/secrets/readonly
+```
+
+To connect without copying the password by hand (works in bash and tcsh):
+
+```bash
+env PGPASSWORD="`sudo -u $SVC_USER cat /service/shire/secrets/postgres`" \
+    psql -h localhost -U postgres -d postgres
+```
+
+If you do copy it from `cat` output, check the file ends with a newline;
+otherwise the shell prompt is printed on the same line, straight after the
+password, and it is easy to copy a character too many or too few. To add one
+to an existing file (this does not change the password):
+
+```bash
+sudo -u $SVC_USER sh -c 'f=/service/shire/secrets/readonly; [ -z "$(tail -c1 "$f")" ] || echo >> "$f"'
 ```
 
 ## Ownership and root_squash
