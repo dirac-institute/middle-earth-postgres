@@ -9,7 +9,8 @@
 # Only host-level concerns live here: checking the service account (from
 # IT's /root/VM.set), finding this host's PostgreSQL config, podman packages,
 # the firewall rule, creating the (empty) directories the containers mount,
-# generating any missing password files, and .env.
+# generating any missing password files, .env, and reserving huge pages for
+# PostgreSQL's shared memory.
 # Everything else belongs in the container image. The service account, SSH,
 # and SELinux are provisioned by IT; this script does not change them.
 #
@@ -206,6 +207,48 @@ PG_SHM_SIZE=$PG_SHM_SIZE
 EOF
 echo "  ok   wrote $ENV_FILE:"
 grep -v '^#' "$ENV_FILE" | sed 's/^/         /'
+
+# ── Huge pages ──────────────────────────────────────────────────────────────
+echo
+echo "== Huge pages =="
+# Reserve exactly the huge pages PostgreSQL's shared memory needs
+# (shared_buffers plus everything sized from max_connections etc.), so it
+# isn't mapped with 4 kB pages whose page tables every connection repeats.
+# The count comes from the real config: build the image and ask a throwaway
+# server (`postgres -C`), which needs a data directory but not the real one.
+# PostgreSQL uses them with huge_pages = try (the default); without them it
+# falls back to normal pages. Reserved pages are RAM no one else can use, so
+# re-run init.sh after changing memory settings in the host file.
+HUGEPAGES_CONF=/etc/sysctl.d/90-postgres-hugepages.conf
+build_log="$(mktemp)"
+if ! (cd "$REPO_DIR" && podman compose build db) >"$build_log" 2>&1; then
+    tail -20 "$build_log" >&2
+    rm -f "$build_log"
+    die "image build failed (needed to size huge pages)"
+fi
+rm -f "$build_log"
+need_pages="$(podman run --rm --network none --user "$SVC_UID:$SVC_GID" \
+    --entrypoint sh middle-earth-postgres/postgres:18 -c '
+        initdb -D /tmp/sizing >/dev/null 2>&1 &&
+        postgres -D /tmp/sizing -c config_file=/etc/postgresql/postgresql.conf \
+                 -c data_directory=/tmp/sizing -C shared_memory_size_in_huge_pages' \
+    2>/dev/null)" || true
+if [[ "$need_pages" =~ ^[0-9]+$ ]] && [ "$need_pages" -gt 0 ]; then
+    page_kb="$(awk '/^Hugepagesize:/ {print $2}' /proc/meminfo)"
+    printf '# Written by middle-earth-postgres init.sh: huge pages for PostgreSQL shared memory.\nvm.nr_hugepages = %s\n' \
+        "$need_pages" > "$HUGEPAGES_CONF"
+    sysctl -q -p "$HUGEPAGES_CONF"
+    have_pages="$(awk '/^HugePages_Total:/ {print $2}' /proc/meminfo)"
+    if [ "$have_pages" -ge "$need_pages" ]; then
+        echo "  ok   vm.nr_hugepages = $need_pages ($((need_pages * page_kb / 1024)) MB) in $HUGEPAGES_CONF"
+        echo "       PostgreSQL uses them from its next start"
+    else
+        warn "asked the kernel for $need_pages huge pages but got $have_pages (memory is fragmented);
+       they will all be reserved at the next boot ($HUGEPAGES_CONF)"
+    fi
+else
+    warn "could not compute shared_memory_size_in_huge_pages; huge pages left unchanged"
+fi
 
 echo
 if [ "$WARNINGS" -gt 0 ]; then

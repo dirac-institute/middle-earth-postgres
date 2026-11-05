@@ -54,7 +54,7 @@ but keeps running the old containers unless told to recreate them.
 | File | Role |
 |---|---|
 | `/root/VM.set` (not in the repo) | Written by IT when the VM is provisioned. The source of truth for the service account name, uid, and gid. |
-| `init.sh` | Host-level only: checks the service account against `VM.set`, finds this host's PostgreSQL config, sizes `/dev/shm` from RAM, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
+| `init.sh` | Host-level only: checks the service account against `VM.set`, finds this host's PostgreSQL config, sizes `/dev/shm` from RAM, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`, reserves huge pages for PostgreSQL's shared memory. Idempotent; never deletes or overwrites anything. |
 | `Dockerfile` | `postgres:18` + pgBackRest, the service user, and the config/scripts below. One image for both containers. |
 | `compose.yaml` | Three services: `db` (PostgreSQL), `backup` (pgBackRest scheduler) and `monitor` (metrics endpoint). |
 | `postgres/postgresql.conf` | Server configuration shared by every host: defaults, then the host file, then the settings the framework depends on (listen on 5432, WAL archiving to pgBackRest, `pg_stat_statements`). |
@@ -201,5 +201,18 @@ and ~48 GB RAM: `shared_buffers = 12GB`, `effective_cache_size = 36GB`). The db
 container's `/dev/shm`, which parallel queries use, is allowed all of the
 VM's RAM (`init.sh` sets `PG_SHM_SIZE` from `/proc/meminfo`): it uses memory
 only while in use, and PostgreSQL's own settings are what limit memory.
+
+**Huge pages.** `init.sh` builds the image, asks a throwaway server for
+`shared_memory_size_in_huge_pages` under the real config, and reserves that
+many in `/etc/sysctl.d/90-postgres-hugepages.conf` (6314 x 2 MB on mpg).
+PostgreSQL uses them with the default `huge_pages = try`, so it still starts
+without them, just with normal pages. Reserved pages are RAM nothing else can
+use, so **re-run `init.sh` after changing memory settings** in the host file
+(or `max_connections`), then recreate the db container. To check:
+
+```bash
+podman exec pg-db psql -U postgres -Atc "show huge_pages_status"   # on
+grep HugePages_ /proc/meminfo
+```
 `/data` needs room for the database plus WAL that piles up if
 `/service/shire` is unreachable (WAL is kept until it has been archived).
