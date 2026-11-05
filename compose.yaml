@@ -8,8 +8,10 @@
 #   backup   pgBackRest scheduler; repository in /service/shire/backups
 #   monitor  metrics endpoint on the VM's port 9187, for the gadget monitor
 #
-# SVC_USER, SVC_UID, SVC_GID must be set in .env (written by init.sh from
-# service.conf). There are no defaults; missing values make compose fail.
+# Everything in ${...} comes from .env, which init.sh writes: the service
+# account from IT's /root/VM.set, this VM's short hostname (which picks
+# postgres/hosts/<hostname>.conf), and its RAM. There are no defaults;
+# missing values make compose fail.
 
 services:
   db:
@@ -19,6 +21,7 @@ services:
         SVC_UID: "${SVC_UID}"
         SVC_GID: "${SVC_GID}"
         SVC_USER: "${SVC_USER}"
+        PG_HOSTNAME: "${PG_HOSTNAME}"
     image: middle-earth-postgres/postgres:18
     container_name: pg-db
     entrypoint: ["/usr/local/bin/start.sh"]
@@ -36,11 +39,12 @@ services:
     # shared_buffers does NOT live here (it is anonymous mmap), so this does
     # not need to scale with shared_buffers.
     #
-    # It is a RAM-backed tmpfs cap, consumed only while in use. Tune per VM
-    # alongside work_mem and max_parallel_workers in postgresql.conf: roughly
-    # work_mem x parallel workers x concurrent parallel queries, with
-    # headroom. 1g is comfortable for the current ~46 GB VM.
-    shm_size: 1g
+    # It is a RAM-backed tmpfs, consuming memory only while in use, so the cap
+    # is set to all of the VM's RAM (PG_SHM_SIZE, from /proc/meminfo by
+    # init.sh). Memory use is tuned in postgresql.conf and the host file
+    # (work_mem, parallel workers); a separate, smaller cap here would only
+    # make big parallel queries fail.
+    shm_size: "${PG_SHM_SIZE}"
     # Run a tiny init (catatonit) as PID 1. pgBackRest's async archiver and
     # the role sync detach into the background; without an init they would
     # be reparented to postgres, which treats any unknown child exiting

@@ -6,9 +6,10 @@
 #   sudo ./init.sh
 #   podman compose up -d --build
 #
-# Only host-level concerns live here: checking the service account, podman
-# packages, the firewall rule, creating the (empty) directories the
-# containers mount, generating any missing password files, and .env.
+# Only host-level concerns live here: checking the service account (from
+# IT's /root/VM.set), finding this host's PostgreSQL config, podman packages,
+# the firewall rule, creating the (empty) directories the containers mount,
+# generating any missing password files, and .env.
 # Everything else belongs in the container image. The service account, SSH,
 # and SELinux are provisioned by IT; this script does not change them.
 #
@@ -19,7 +20,10 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$REPO_DIR/.env"
-CONF_FILE="$REPO_DIR/service.conf"
+# Written by IT when the VM is provisioned and authoritative for the service
+# account. tcsh syntax: `set VMUSER=astro-mpg`.
+VM_SET=/root/VM.set
+HOSTS_DIR="$REPO_DIR/postgres/hosts"
 
 DATA_MOUNT=/data
 DATA_ROOT=$DATA_MOUNT/postgres
@@ -29,25 +33,27 @@ BACKUPS=$SHIRE/backups
 SCRATCH=$SHIRE/restore-scratch
 ROLES=(postgres owner readwrite readonly replication)
 
-if [ ! -f "$CONF_FILE" ]; then
-    echo "FATAL: $CONF_FILE not found." >&2
-    echo "This file defines SVC_USER, SVC_UID, and SVC_GID for the service account." >&2
-    exit 1
-fi
-# shellcheck source=service.conf
-source "$CONF_FILE"
-for var in SVC_USER SVC_UID SVC_GID; do
-    if [ -z "${!var:-}" ]; then
-        echo "FATAL: $var is not set in $CONF_FILE" >&2
-        exit 1
-    fi
-done
-
 WARNINGS=0
 warn() { echo "WARNING: $*" >&2; WARNINGS=$((WARNINGS + 1)); }
 die()  { echo "FATAL: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
+
+# vmset NAME: the value of `set NAME=value` in VM.set, quotes removed. The
+# file is parsed, never executed; lines of any other form are ignored.
+vmset() {
+    sed -n -E "s/^[[:space:]]*set[[:space:]]+$1=(\"([^\"]*)\"|'([^']*)'|([^[:space:]\"']*))[[:space:]]*\$/\2\3\4/p" \
+        "$VM_SET" | tail -n 1
+}
+[ -r "$VM_SET" ] || die "$VM_SET not found. IT writes it when the VM is provisioned; it
+       defines the service account (VMUSER, VMUID, VMGID). Ask PACS via help-astro@uw.edu."
+SVC_USER="$(vmset VMUSER)"
+SVC_UID="$(vmset VMUID)"
+SVC_GID="$(vmset VMGID)"
+VM_NAME="$(vmset VM)"
+[[ "$SVC_USER" =~ ^[a-z_][a-z0-9_.-]*$ ]] || die "VMUSER in $VM_SET is missing or not a user name: '$SVC_USER'"
+[[ "$SVC_UID" =~ ^[0-9]+$ ]] || die "VMUID in $VM_SET is missing or not a number: '$SVC_UID'"
+[[ "$SVC_GID" =~ ^[0-9]+$ ]] || die "VMGID in $VM_SET is missing or not a number: '$SVC_GID'"
 
 # Run a command as the service account. /service/shire is NFS exported with
 # root_squash, so root cannot create or read files there -- only this uid can.
@@ -57,8 +63,7 @@ as_svc() { setpriv --reuid="$SVC_UID" --regid="$SVC_GID" --clear-groups "$@"; }
 echo "== Service account =="
 account_fail() {
     echo "FATAL: $*" >&2
-    echo "Fix SVC_USER/SVC_UID/SVC_GID in $CONF_FILE to match the service account" >&2
-    echo "on this VM, or request the account from PACS via help-astro@uw.edu." >&2
+    echo "$VM_SET and the accounts on this VM disagree; ask PACS via help-astro@uw.edu." >&2
     exit 1
 }
 have_user="$(getent passwd "$SVC_USER" || true)"
@@ -66,10 +71,32 @@ have_user="$(getent passwd "$SVC_USER" || true)"
 have_uid="$(echo "$have_user" | cut -d: -f3)"
 have_gid="$(echo "$have_user" | cut -d: -f4)"
 [ "$have_uid" = "$SVC_UID" ] \
-    || account_fail "user $SVC_USER has uid $have_uid, service.conf says $SVC_UID"
+    || account_fail "user $SVC_USER has uid $have_uid, VM.set says $SVC_UID"
 [ "$have_gid" = "$SVC_GID" ] \
-    || account_fail "user $SVC_USER has primary gid $have_gid, service.conf says $SVC_GID"
-echo "  ok   user $SVC_USER ($SVC_UID:$SVC_GID) exists"
+    || account_fail "user $SVC_USER has primary gid $have_gid, VM.set says $SVC_GID"
+echo "  ok   user $SVC_USER ($SVC_UID:$SVC_GID) from $VM_SET exists"
+
+# ── PostgreSQL host config ─────────────────────────────────────────────────
+echo
+echo "== PostgreSQL host config =="
+# postgres/hosts/<short hostname>.conf is baked into the image and included
+# by postgresql.conf. The short name, not the FQDN: mpg, not
+# mpg.astro.washington.edu.
+PG_HOSTNAME="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+[[ "$PG_HOSTNAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "unexpected short hostname '$PG_HOSTNAME'"
+HOST_CONF="postgres/hosts/$PG_HOSTNAME.conf"
+[ -f "$REPO_DIR/$HOST_CONF" ] || die "no PostgreSQL config for this host: $HOST_CONF
+       Create it (copy another host's file and size the memory settings for
+       this VM), commit it, and re-run init.sh."
+echo "  ok   $HOST_CONF"
+[ -z "$VM_NAME" ] || [ "$VM_NAME" = "$PG_HOSTNAME" ] \
+    || warn "VM.set says VM=$VM_NAME but the hostname is $PG_HOSTNAME; using the hostname"
+
+# The db container's /dev/shm (parallel query shared memory) may use all of
+# the VM's RAM; PostgreSQL's own settings are what limit memory use.
+mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+PG_SHM_SIZE="$((mem_kb / 1024))m"
+echo "  ok   /dev/shm for the db container: $PG_SHM_SIZE (all RAM)"
 
 # ── Packages ────────────────────────────────────────────────────────────────
 echo
@@ -167,14 +194,18 @@ done
 # ── Compose environment ────────────────────────────────────────────────────
 echo
 echo "== Compose environment =="
-# .env is gitignored and per-host; service.conf is the committed source of
-# truth for the identity values.
+# .env is gitignored and derived: rewritten on every run from VM.set, the
+# hostname and /proc/meminfo.
 cat > "$ENV_FILE" <<EOF
+# Written by init.sh on every run; don't edit.
 SVC_USER=$SVC_USER
 SVC_UID=$SVC_UID
 SVC_GID=$SVC_GID
+PG_HOSTNAME=$PG_HOSTNAME
+PG_SHM_SIZE=$PG_SHM_SIZE
 EOF
-echo "  ok   SVC_USER=$SVC_USER SVC_UID=$SVC_UID SVC_GID=$SVC_GID written to $ENV_FILE"
+echo "  ok   wrote $ENV_FILE:"
+grep -v '^#' "$ENV_FILE" | sed 's/^/         /'
 
 echo
 if [ "$WARNINGS" -gt 0 ]; then

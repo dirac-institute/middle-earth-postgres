@@ -1,7 +1,12 @@
 # Deploying Middle-earth PostgreSQL to a DiRAC VM
 
 Target: stock Rocky 10 VM on UW DiRAC infrastructure, with a `/data`
-partition and the service's `/service/shire` NFS share mounted.
+partition, the service's `/service/shire` NFS share mounted, and IT's
+`/root/VM.set` naming the service account.
+
+**New VM?** It needs `postgres/hosts/<hostname>.conf` (the short hostname, e.g.
+`mpg`) in the repo first; `init.sh` stops if it's missing. See
+[Per-host configuration](#per-host-configuration).
 
 ```bash
 git clone <this repo> /root/middle-earth-postgres
@@ -33,9 +38,9 @@ curl -s http://$(hostname -f):9187/metrics | grep -E '^pg_up|probe_success'
 
 ## Updating
 
-After pulling changes to the repo (or editing `postgresql.conf`,
-`pg_hba.conf`, `pgbackrest.conf`, or the scripts, which are all baked into
-the image):
+After pulling changes to the repo (or editing `postgresql.conf`, this host's
+`postgres/hosts/<hostname>.conf`, `pg_hba.conf`, `pgbackrest.conf`, or the
+scripts, which are all baked into the image):
 
 ```bash
 podman compose up -d --build --force-recreate
@@ -48,11 +53,12 @@ but keeps running the old containers unless told to recreate them.
 
 | File | Role |
 |---|---|
-| `service.conf` | Single source of truth for the service account name, uid, and gid. |
-| `init.sh` | Host-level only: checks the service account, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
+| `/root/VM.set` (not in the repo) | Written by IT when the VM is provisioned. The source of truth for the service account name, uid, and gid. |
+| `init.sh` | Host-level only: checks the service account against `VM.set`, finds this host's PostgreSQL config, sizes `/dev/shm` from RAM, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`. Idempotent; never deletes or overwrites anything. |
 | `Dockerfile` | `postgres:18` + pgBackRest, the service user, and the config/scripts below. One image for both containers. |
 | `compose.yaml` | Three services: `db` (PostgreSQL), `backup` (pgBackRest scheduler) and `monitor` (metrics endpoint). |
-| `postgres/postgresql.conf` | Server configuration: listen on 5432, memory sizing, WAL archiving to pgBackRest. |
+| `postgres/postgresql.conf` | Server configuration shared by every host: defaults, then the host file, then the settings the framework depends on (listen on 5432, WAL archiving to pgBackRest, `pg_stat_statements`). |
+| `postgres/hosts/<hostname>.conf` | Per-host settings (memory sizing), one file per VM, named by short hostname. |
 | `postgres/pg_hba.conf` | Client authentication: SCRAM passwords for all network logins; replication only for the `replication` role. |
 | `postgres/start.sh` | db entrypoint: checks the password files, starts the role sync, hands off to the stock postgres entrypoint. |
 | `postgres/sync-roles.sh` | Creates the five roles if missing and sets their passwords from the secrets files. Never drops anything. |
@@ -122,10 +128,57 @@ or to archive into a repository that belongs to a different cluster.
 
 ## Service identity and `.env`
 
-`service.conf` defines `SVC_USER`, `SVC_UID`, `SVC_GID`. `init.sh` checks the
-account exists on the VM with exactly those ids and writes them to `.env`,
-which podman compose reads. The image is built with a matching user and both
-containers run as that uid. `.env` is gitignored and per-host.
+IT leaves `/root/VM.set` on every VM, in tcsh syntax:
+
+```
+set VM=mpg
+set VMUSER=astro-mpg
+set VMUID=1734831
+set VMGID=2121734831
+```
+
+`init.sh` reads `VMUSER`, `VMUID` and `VMGID` (it parses the file and never
+runs it), checks the account exists on the VM with exactly those ids, and
+writes them to `.env` as `SVC_USER`, `SVC_UID`, `SVC_GID`. The image is built
+with a matching user and every container runs as that uid.
+
+`.env` is gitignored and derived: `init.sh` rewrites it on every run, from
+`VM.set`, the short hostname (`PG_HOSTNAME`) and the VM's RAM
+(`PG_SHM_SIZE`). Re-run `init.sh` rather than editing it.
+
+## Per-host configuration
+
+PostgreSQL settings come from two files, both baked into the image:
+
+- `postgres/postgresql.conf`, shared by every host.
+- `postgres/hosts/<hostname>.conf`, for this VM only. `<hostname>` is
+  `hostname -s`, lowercased: `mpg`, not `mpg.astro.washington.edu`.
+  `init.sh` puts it in `.env` and the build copies that file to
+  `/etc/postgresql/host.conf`.
+
+`postgresql.conf` includes the host file partway through. When a setting
+appears twice the later one wins, so:
+
+1. **Defaults** come first; the host file can override any of them.
+2. **The host file** (memory sizing today).
+3. **Framework settings** come after the include, so a host file can't change
+   them by accident: listening and `pg_hba.conf`, WAL archiving to pgBackRest,
+   `shared_preload_libraries` (for monitoring), and `allow_alter_system = off`.
+
+`ALTER SYSTEM` is turned off because it writes `postgresql.auto.conf`, which
+PostgreSQL reads after both files and which would silently override the repo.
+Change the files and redeploy instead.
+
+To check where a running setting came from:
+
+```bash
+podman exec pg-db psql -U postgres -c \
+  "select name, setting, sourcefile from pg_settings where name = 'work_mem'"
+```
+
+**Adding a host:** copy an existing file to `postgres/hosts/<hostname>.conf`,
+size the memory settings for that VM, and commit it. Without it, `init.sh`
+stops with an error, and so would the image build and PostgreSQL itself.
 
 ## VM infrastructure context
 
@@ -143,9 +196,10 @@ containers run as that uid. `.env` is gitignored and per-host.
 
 ## Sizing
 
-`postgresql.conf` is sized for the current VM (8 cores, ~46 GB RAM:
-`shared_buffers = 8GB`, `effective_cache_size = 24GB`). Adjust for other VMs.
-The db container's `shm_size` in `compose.yaml` (1g) is related: it caps the
-`/dev/shm` space parallel queries use, and is explained in a comment there.
+Memory is sized per VM in `postgres/hosts/<hostname>.conf` (for mpg, 8 cores
+and ~46 GB RAM: `shared_buffers = 8GB`, `effective_cache_size = 24GB`). The db
+container's `/dev/shm`, which parallel queries use, is allowed all of the
+VM's RAM (`init.sh` sets `PG_SHM_SIZE` from `/proc/meminfo`): it uses memory
+only while in use, and PostgreSQL's own settings are what limit memory.
 `/data` needs room for the database plus WAL that piles up if
 `/service/shire` is unreachable (WAL is kept until it has been archived).

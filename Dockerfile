@@ -14,6 +14,9 @@ RUN apt-get update && \
 ARG SVC_UID
 ARG SVC_GID
 ARG SVC_USER
+# Short hostname of the VM this image is built on (from .env, set by init.sh).
+# Picks postgres/hosts/<PG_HOSTNAME>.conf; the build fails if it is missing.
+ARG PG_HOSTNAME
 
 # A real passwd entry for the service uid: initdb, psql, and pgBackRest all
 # look up the current user's name.
@@ -21,6 +24,7 @@ RUN groupadd -g ${SVC_GID} ${SVC_USER} && \
     useradd -u ${SVC_UID} -g ${SVC_GID} -M -d /var/lib/postgresql -s /usr/sbin/nologin ${SVC_USER}
 
 COPY postgres/postgresql.conf postgres/pg_hba.conf /etc/postgresql/
+COPY postgres/hosts/${PG_HOSTNAME}.conf /etc/postgresql/host.conf
 COPY backup/pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
 COPY postgres/start.sh postgres/sync-roles.sh \
      backup/scheduler.sh backup/restore-test.sh \
