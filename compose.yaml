@@ -3,10 +3,13 @@
 #   sudo ./init.sh               # once per VM; safe to re-run
 #   podman compose up -d --build
 #
-# Three containers from one image (Dockerfile = postgres:18 + pgBackRest):
-#   db       PostgreSQL on the VM's port 5432, data in /data/postgres
-#   backup   pgBackRest scheduler; repository in /service/shire/backups
-#   monitor  metrics endpoint on the VM's port 9187, for the gadget monitor
+# Three containers from one image (Dockerfile = postgres:18 + pgBackRest),
+# plus the service VM monitor (monitoring/, its own small image):
+#   db          PostgreSQL on the VM's port 5432, data in /data/postgres
+#   backup      pgBackRest scheduler; repository in /service/shire/backups
+#   monitor     PostgreSQL metrics on the VM's port 9187, for the gadget monitor
+#   monitoring  the VM's CPU, memory and disks on port 9110, for the gadget
+#               monitor
 #
 # Everything in ${...} comes from .env, which init.sh writes: the service
 # account from IT's /root/VM.set, this VM's short hostname (which picks
@@ -119,6 +122,18 @@ services:
     restart: unless-stopped
     labels:
       idac.service: pg-monitor
+
+  # CPU, memory and disks of this VM, for the gadget monitor
+  # (monitoring/README.md). monitoring/ is copied unchanged from the gadget
+  # monitor's repo; its settings live in monitoring/compose.yaml.
+  monitoring:
+    extends:
+      file: monitoring/compose.yaml
+      service: monitoring
+    build: monitoring
+    container_name: pg-service-vm
+    labels:
+      idac.service: pg-service-vm
 
 volumes:
   # Shared Unix socket directory, so the backup and monitor containers can

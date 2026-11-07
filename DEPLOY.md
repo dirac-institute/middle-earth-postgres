@@ -21,7 +21,7 @@ Restoring onto a new VM after losing the old one? Run `./restore.sh` between
 Then verify:
 
 ```bash
-podman ps                       # pg-db (healthy), pg-backup and pg-monitor, all Up
+podman ps                       # pg-db (healthy), pg-backup, pg-monitor and pg-service-vm, all Up
 podman logs pg-db | grep sync-roles
 #   sync-roles: roles postgres, owner, readwrite, readonly, replication are in sync ...
 podman logs pg-backup | grep scheduler
@@ -34,7 +34,12 @@ and from another machine:
 psql "host=$(hostname -f) user=readonly dbname=postgres" -c 'select 1'
 curl -s http://$(hostname -f):9187/metrics | grep -E '^pg_up|probe_success'
 #   pg_up 1 / pgmon_backup_probe_success 1
+curl -s http://$(hostname -f):9110/metrics | grep -E 'load1 |filesystem_size'
 ```
+
+**New VM?** The gadget monitor only polls VMs listed in its own repo: open a
+pull request there to add this one (see `MONITORING.md`, "Registering a VM
+with the gadget monitor").
 
 ## Updating
 
@@ -56,7 +61,7 @@ but keeps running the old containers unless told to recreate them.
 | `/root/VM.set` (not in the repo) | Written by IT when the VM is provisioned. The source of truth for the service account name, uid, and gid. |
 | `init.sh` | Host-level only: checks the service account against `VM.set`, finds this host's PostgreSQL config, sizes `/dev/shm` from RAM, installs podman + podman-compose, enables `podman-restart.service`, opens 5432 and 9187 in firewalld, creates `/data/postgres` and the `/service/shire` directories, generates missing password files, writes `.env`, reserves huge pages for PostgreSQL's shared memory. Idempotent; never deletes or overwrites anything. |
 | `Dockerfile` | `postgres:18` + pgBackRest, the service user, and the config/scripts below. One image for both containers. |
-| `compose.yaml` | Three services: `db` (PostgreSQL), `backup` (pgBackRest scheduler) and `monitor` (metrics endpoint). |
+| `compose.yaml` | Four services: `db` (PostgreSQL), `backup` (pgBackRest scheduler), `monitor` (PostgreSQL metrics endpoint) and `monitoring` (the VM's CPU, memory and disks). |
 | `postgres/postgresql.conf` | Server configuration shared by every host: defaults, then the host file, then the settings the framework depends on (listen on 5432, WAL archiving to pgBackRest, `pg_stat_statements`). |
 | `postgres/hosts/<hostname>.conf` | Per-host settings (memory sizing), one file per VM, named by short hostname. |
 | `postgres/pg_hba.conf` | Client authentication: SCRAM passwords for all network logins; replication only for the `replication` role. |
@@ -68,6 +73,7 @@ but keeps running the old containers unless told to recreate them.
 | `restore.sh` | Disaster recovery: rebuilds `/data/postgres` from the backup repository. |
 | `monitor/exporter.py`, `monitor/metrics.sql` | Metrics endpoint on port 9187 for the gadget monitor; see `MONITORING.md`. |
 | `monitor/custom/` | Deployment-specific metric queries (empty in the template). |
+| `monitoring/` | The gadget monitor's service VM monitor, copied unchanged from its repo: the VM's CPU, memory, disks and load on port 9110. See `MONITORING.md`. |
 
 ## Architecture
 
@@ -90,7 +96,9 @@ but keeps running the old containers unless told to recreate them.
 
 Not drawn: `pg-monitor` (host network, port 9187) reads PostgreSQL over the
 same shared socket and the backup repository read-only, and serves metrics
-for the gadget monitor (see `MONITORING.md`).
+for the gadget monitor; `pg-service-vm` (published port 9110) reads the VM's
+`/proc` and its local filesystems read-only, for the same (see
+`MONITORING.md`).
 
 ## Design choices
 
@@ -188,7 +196,9 @@ stops with an error, and so would the image build and PostgreSQL itself.
   to survive a reboot. `init.sh` enables it.
 - **firewalld**: `init.sh` adds the `postgresql` service (5432/tcp) and the
   metrics endpoint (9187/tcp) to the default zone. To restrict which networks can connect, replace that with a
-  rich rule or a zone with `--add-source` ranges.
+  rich rule or a zone with `--add-source` ranges. The service VM monitor's
+  port 9110 is published by podman rather than opened in firewalld, so these
+  rules don't apply to it (see `MONITORING.md`).
 - **`/service/shire`** is NFS exported with `root_squash`: root on the VM is
   `nobody` there. Anything that touches it runs as the service account.
 - **SELinux** is configured by IT. If it is enforcing, the bind mounts may

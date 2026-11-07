@@ -1,0 +1,27 @@
+# The service VM monitor's compose settings, shared by every service repo that
+# copies this folder. A repo's own compose.yaml pulls them in with `extends`
+# and adds only its build context, container name and labels (see README.md,
+# "Adding it to a service"). Not a compose project on its own.
+#
+# `extends`, not `include`: podman-compose resolves the paths in an included
+# file against the project directory, docker compose against the included
+# file's, so one `include`d file can't work under both. The build context is
+# left to the repo's own entry: podman-compose 1.5 mangles a relative build
+# context that comes from an extended file (monitoring/monitoring/Dockerfile).
+
+services:
+  monitoring:
+    image: localhost/service-vm-monitor:latest
+    init: true
+    user: "${SVC_UID}:${SVC_GID}"
+    # The VM's filesystems, for their size and free space. Read-only; rslave
+    # so mounts made or removed on the host later show up here too. No
+    # relabeling (:z) of the host's root, ever.
+    volumes:
+      - "/:/host:ro,rslave"
+    # So statting the host's filesystems works on an SELinux-enforcing VM.
+    security_opt:
+      - label=disable
+    ports:
+      - "9110:9110"
+    restart: unless-stopped

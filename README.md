@@ -41,8 +41,9 @@ podman compose up -d --build
   verification, and a monthly automated test restore.
 - **A monitoring endpoint** on port 9187 (Prometheus text): connections,
   throughput, query timing, database and disk sizes, WAL archiving,
-  replication, and backup and restore-test status, polled by the DiRAC
-  gadget monitor.
+  replication, and backup and restore-test status; and on port 9110 the
+  VM's CPU, memory, disks and load. Both are polled by the DiRAC gadget
+  monitor once the VM is registered there (see `MONITORING.md`).
 
 ## Connecting
 
@@ -66,8 +67,8 @@ psql "host=<vm fqdn> user=owner dbname=postgres" -c 'CREATE DATABASE mydb'
 - **`SECRETS.md`** -- the password files, root_squash, and changing passwords.
 - **`BACKUP.md`** -- how backups work, retention, monitoring, restore testing,
   disaster recovery, and major-version upgrades.
-- **`MONITORING.md`** -- the metrics endpoint: what it serves and how to add
-  deployment-specific metrics.
+- **`MONITORING.md`** -- the metrics endpoints: what they serve, registering
+  a new VM with the gadget monitor, and adding deployment-specific metrics.
 
 ## What you need from DiRAC infrastructure
 
