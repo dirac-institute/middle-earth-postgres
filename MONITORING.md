@@ -1,22 +1,96 @@
 # Monitoring
 
-The `pg-monitor` container serves Prometheus text metrics at
-
-```
-http://<vm fqdn>:9187/metrics
-```
-
-for the DiRAC gadget monitor
+Two containers serve Prometheus text metrics for the DiRAC gadget monitor
 ([middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor)),
-which polls it every minute from its own VM and graphs it on its **Postgres**
-dashboard. To add a server there, add it to that repo's
-`config/postgres.toml`.
+which polls each one every minute from its own VM:
+
+| Container | Endpoint | What | Gadget dashboard | Gadget config |
+|---|---|---|---|---|
+| `pg-monitor` | `http://<vm fqdn>:9187/metrics` | PostgreSQL and backups (this file) | **Postgres** | `config/postgres.toml` |
+| `pg-service-vm` | `http://<vm fqdn>:9110/metrics` | The VM's CPU, memory, disks and load | **Service VMs** | `config/service_vms.toml` |
 
 ```bash
 curl -s http://localhost:9187/metrics
+curl -s http://localhost:9110/metrics
 ```
 
-## How it works
+Deploying this repo starts both endpoints, but the gadget monitor only polls
+VMs listed in its own repo: a new VM needs a pull request there (see
+[Registering a VM with the gadget monitor](#registering-a-vm-with-the-gadget-monitor)).
+
+## Registering a VM with the gadget monitor
+
+Do this once per VM, after it is deployed and both endpoints answer. It is a
+change to the gadget monitor's repo, not this one.
+
+1. **Check both endpoints from another machine** (from the VM itself is not
+   enough: it doesn't show the firewall is open):
+
+   ```bash
+   curl -s http://<vm fqdn>:9187/metrics | grep -E '^pg_up|probe_success'
+   #   pg_up 1 / pgmon_sizes_probe_success 1 / pgmon_backup_probe_success 1
+   curl -s http://<vm fqdn>:9110/metrics | grep -E 'load1 |filesystem_size'
+   ```
+
+2. **Open a pull request to
+   [middle-earth-gadget-monitor](https://github.com/dirac-institute/middle-earth-gadget-monitor)**
+   adding the VM to two files. Use the VM's short hostname (`hostname -s`)
+   as `name` in both, so its PostgreSQL and VM graphs line up, and its fully
+   qualified name as `address`:
+
+   `config/postgres.toml`:
+
+   ```toml
+   [[server]]
+   name = "<short hostname>"          # becomes the `server` label; keep it stable
+   address = "<vm fqdn>"
+   # prefixes = ["<ns>_"]             # only if monitor/custom/ adds metrics
+   ```
+
+   `config/service_vms.toml`:
+
+   ```toml
+   [[service_vm]]
+   name = "<short hostname>"          # becomes the `service_vm` label; keep it stable
+   address = "<vm fqdn>"
+   ```
+
+   Leave out `port`, `vm_port` and `metrics_url` unless the deployment
+   changed them; the defaults (5432, 22, 9187 and 9110) are what this repo
+   uses. If the VM is replacing another one (disaster recovery onto a new
+   VM, say), change the old entries' `address` and keep their `name`: a
+   renamed entry starts new series and the history is left under the old
+   name. Check the files first, as an entry may already exist.
+
+   In the PR description, say which repo the VM was deployed from
+   (middle-earth-postgres), and paste the output of the two `curl`
+   commands above as evidence both endpoints answer from off the VM.
+
+3. **After it merges and the gadget monitor is redeployed** (see that repo's
+   README), the VM appears on the **Postgres** and **Service VMs**
+   dashboards within a couple of minutes. No dashboard changes are needed.
+   If it doesn't, the gadget monitor's own metrics say why:
+   `gadget_postgres_exporter_status` and `gadget_service_vm_status` (by
+   `status`: `connect_error` usually means a firewall), and
+   `gadget_*_lines_dropped` (metric names outside the allowed prefixes).
+
+## The service VM monitor (port 9110)
+
+`monitoring/` is the gadget monitor repo's service VM monitor, copied in
+**unchanged**: the same folder goes into every DiRAC service repo. Its own
+`monitoring/README.md` documents what it reports and why its settings are
+what they are; `compose.yaml` here only adds the build context, the
+container name (`pg-service-vm`) and the label. To update it, copy the
+folder again from the gadget monitor's repo rather than editing it here.
+
+It differs from the rest of this repo in one way: it **publishes** port 9110
+instead of using host networking, so firewalld does not govern it (podman's
+DNAT bypasses the zone rules) and `init.sh` opens nothing for it. Anyone who
+can reach the VM can read its CPU, memory and disk figures. That is the
+gadget monitor's standard choice; `monitoring/README.md` describes how to
+restrict it.
+
+## How pg-monitor works
 
 `monitor/exporter.py` (standard-library Python, same image as the db) runs
 two collectors in background threads and serves whatever they last
